@@ -1,3 +1,4 @@
-miragecheck
-miragecheck-*
+# built binaries at the repo root only - do NOT match cmd/miragecheck/
+/miragecheck
+/miragecheck-*
 *.exe
