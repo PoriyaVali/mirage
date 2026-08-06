@@ -1,21 +1,28 @@
 // Package mirage splits a TLS ClientHello across two TLS records so that an
-// on-path censor cannot match on the server name, while the real server still
+// on-path censor stops acting on the server name, while the real server still
 // reassembles the handshake normally.
 //
-// The shape is the whole point. Splitting the handshake at a random position
-// *inside* the SNI hostname — what several existing implementations do — was
-// measured to be dropped by Iran's DPI, even for a hostname that is otherwise
-// allowed. What survives is the opposite: one small first record that ends
-// *before* the SNI, with the name left intact in the second record, and both
-// records written in a single TCP segment.
+// The shape is the whole point, and it is the *size* of the first record that
+// decides the outcome — not where the name sits. Measured against Iran's DPI,
+// a first record of 1, 2, 4 or 5 bytes carries a censored name through, while
+// 3 and everything from 6 upwards is dropped; a 64-byte first record leaves
+// the name entirely in the second record and is still dropped, so the censor
+// is not merely failing to find it. The safe set is reproducible and identical
+// for a Go and a Chrome client hello, which makes it a property of the
+// censor's parser rather than of particular byte values.
 //
-// The reason is that this censor parses only the first TLS record looking for
-// a ClientHello server name. When the name is not there it stops looking
-// rather than reassembling the records, so the handshake sails through.
+// Two constraints come with that:
 //
-// Splitting at the TCP layer instead does not help: the same censor
-// reassembles the TCP stream before matching. This has to happen at the TLS
-// record layer.
+//   - Both records must leave in one TCP write. The same two records sent as
+//     separate segments were dropped in every measurement.
+//   - A size the censor dislikes is dropped even for an allowed name, so a bad
+//     choice takes the whole connection down rather than just failing to
+//     evade. Splitting inside the name is one such choice, and it is what
+//     several existing implementations do.
+//
+// Splitting at the TCP layer instead does not help at all: that censor
+// reassembles the stream before matching. This has to happen at the record
+// layer.
 package mirage
 
 import (
@@ -39,6 +46,17 @@ const (
 // ErrNotClientHello is returned by Split when the buffer is not a TLS
 // ClientHello record it can safely fragment.
 var ErrNotClientHello = errors.New("mirage: not a splittable ClientHello")
+
+// MeasuredSafeSizes are the first-record sizes that carried a censored server
+// name through Iran's DPI in August 2026, over 680 probes from a residential
+// mobile connection and a datacenter host. 3 sits between two of them and does
+// not work, and nothing from 6 upwards does.
+//
+// This is a property of one censor at one time, not of TLS. On another network
+// measure it with the miragecheck tool in this repository before trusting it;
+// a size the censor dislikes is dropped even for names it allows, so a wrong
+// guess costs the whole connection.
+var MeasuredSafeSizes = []int{1, 2, 4, 5}
 
 // Conn wraps a connection and fragments the first ClientHello written to it.
 // Every later write passes through untouched.
@@ -97,11 +115,13 @@ func Split(record []byte, offset int) ([]byte, error) {
 
 	sni := IndexSNI(handshake)
 	if sni < 0 {
-		// No server name to hide, so there is nothing to gain.
+		// No server name in play, so there is nothing to gain.
 		return nil, ErrNotClientHello
 	}
 	split := offset
 	if split >= sni {
+		// Never let the cut land inside the name: that layout was measured to
+		// be dropped, and it is the one several other implementations pick.
 		split = sni / 2
 	}
 	if split <= 0 || split >= len(handshake) {

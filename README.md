@@ -11,23 +11,43 @@ implementations get backwards.
 
 ## The finding
 
-Against Iran's DPI, measured from two vantage points in August 2026:
+Against Iran's DPI, measured from a datacenter host and a residential mobile
+connection, most recently over 680 probes in August 2026:
 
-| technique | result |
+| first record | result |
 |---|---|
-| Split the ClientHello across TCP segments | **fails** — this censor reassembles the TCP stream before matching |
-| Split the TLS record at a random point **inside** the server name | **fails** — dropped even for a hostname that is otherwise allowed |
-| One small first record ending **before** the server name, name intact in the second, both in one TCP segment | **works** |
+| none — send the ClientHello whole | blocked: **reset** on a censored name |
+| 1, 2, 4, 5 bytes, both records in one TCP segment | **works** — every censored name completed a TLS 1.3 handshake |
+| 3 bytes | dropped |
+| 6 bytes and above, up to 64 | dropped |
+| the same two records in **two** TCP segments | dropped |
+| split inside the server name | dropped |
 
-The censor parses only the first TLS record looking for a ClientHello server
-name. When the name is not there it stops looking instead of reassembling the
-records, so the handshake goes through. Splitting inside the name leaves a
-fragment of it in the first record and the connection dies; splitting at the
-TCP layer does nothing at all.
+What makes this work is the **size of the first record**, not where the name
+sits. An earlier version of this file claimed the censor stops parsing when the
+name is absent from the first record; that was wrong. A 64-byte first record
+leaves the name entirely in the second record and is still dropped, so the
+censor is not simply failing to find it — a first record small enough makes it
+abandon the flow instead.
 
-Every server name that was reset without Mirage completed a full TLS 1.3
-handshake with it, from a datacenter host and from a residential mobile
-connection.
+The safe set is **not contiguous**: 3 fails while 2 and 4 pass, reproducibly,
+and identically for a Go and a Chrome client hello. So it is a property of the
+censor's parser rather than of any particular byte values.
+
+### The part that can bite you
+
+This censor enforces two independent rules:
+
+1. a censored server name gets a fast **RST**
+2. a record layout it dislikes is **silently dropped — even for a name it
+   allows**
+
+The second one means a badly chosen first-record size does not merely fail to
+evade: it takes the whole connection down, including traffic that would have
+been fine. Measure before you pick a value, and prefer the sizes above.
+
+Evasion costs nothing measurable: medians were 286–306 ms across the working
+layouts against 310 ms unmodified.
 
 ## Why it matters for REALITY
 
@@ -36,11 +56,10 @@ site, and that borrowed name travels in the clear. If the censor blocks that
 name, the node dies — so operators must hunt for a borrowed site that is both
 plausible and unblocked, and re-hunt whenever the blocklist moves.
 
-Fragmenting the ClientHello removes the constraint: the censor never sees the
-borrowed name, so it no longer has to be a host the censor allows. In an
-end-to-end test, a REALITY endpoint whose borrowed site was a **blocked**
-domain was reset on every attempt without Mirage and carried traffic normally
-with it.
+Fragmenting the ClientHello removes the constraint: the censor stops acting on
+that name, so it no longer has to be a host the censor allows. In an end-to-end
+test, a REALITY endpoint whose borrowed site was a **blocked** domain was reset
+on every attempt without Mirage and carried traffic normally with it.
 
 ## Use it as a library
 
@@ -52,7 +71,10 @@ conn = mirage.NewConn(conn, 0) // 0 selects the measured default offset
 tlsConn := tls.Client(conn, cfg)
 ```
 
-`Split` is also exported if you would rather rewrite a buffer yourself.
+`Split` is also exported if you would rather rewrite a buffer yourself. If you
+do, write **both records in a single call**. The same two records sent as two
+TCP segments were dropped in every measurement, so the layout only survives
+while it arrives together.
 
 ## Measure your own network
 
@@ -73,6 +95,27 @@ blocked.example                  blocked: reset               ok (tls 0x304)
 
 Prebuilt binaries for Linux, Windows, macOS, Android and common router
 architectures are attached to each release.
+
+To find the safe sizes on a network rather than assume them, `sweep` walks the
+first-record size and repeats each one:
+
+```console
+$ go run ./cmd/sweep -sni blocked.example            # which sizes pass
+$ go run ./cmd/sweep -mode repeat -offset 5 -n 20    # is one size stable
+```
+
+Two habits make the results trustworthy, both learned the hard way:
+
+- **Probe an allowed name in every run.** A layout that fails for a censored
+  name *and* for an allowed one was not censored, it was broken — and the two
+  are indistinguishable without the control.
+- **Run the same binary from an uncensored network.** A bug in your own
+  fragmentation code looks exactly like a censorship finding until you see it
+  fail somewhere with no censor.
+
+Also worth knowing when reading results: a failure to even establish TCP says
+nothing about the layout, since it happens before any of these bytes are sent.
+Counting those as failures once made a passing size look unstable here.
 
 ## Limits
 
