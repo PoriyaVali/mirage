@@ -13,8 +13,8 @@
 //
 // Two constraints come with that:
 //
-//   - Both records must leave in one TCP write. The same two records sent as
-//     separate segments were dropped in every measurement.
+//   - The two records must leave in SEPARATE writes. This was the opposite in
+//     August, and the reversal is measured, not guessed - see the note below.
 //   - A size the censor dislikes is dropped even for an allowed name, so a bad
 //     choice takes the whole connection down rather than just failing to
 //     evade. Splitting inside the name is one such choice, and it is what
@@ -81,12 +81,17 @@ func (c *Conn) Write(b []byte) (int, error) {
 	}
 	c.firstWritten = true
 
-	out, err := Split(b, c.offset)
+	first, second, err := SplitRecords(b, c.offset)
 	if err != nil {
 		// Not something we can fragment - send it exactly as given.
 		return c.Conn.Write(b)
 	}
-	if _, err := c.Conn.Write(out); err != nil {
+	// One write per record. Concatenating them is the shape that is now
+	// dropped; see the package comment.
+	if _, err := c.Conn.Write(first); err != nil {
+		return 0, err
+	}
+	if _, err := c.Conn.Write(second); err != nil {
 		return 0, err
 	}
 	// Report the caller's length: from their point of view the whole buffer
@@ -98,25 +103,39 @@ func (c *Conn) ReaderReplaceable() bool { return true }
 func (c *Conn) WriterReplaceable() bool { return c.firstWritten }
 func (c *Conn) Upstream() any           { return c.Conn }
 
-// Split rewrites a ClientHello record into two records, the first ending
-// before the server name. The result is meant to be written in one call so it
-// leaves as a single TCP segment.
+// Split returns the two records concatenated, for callers that want the bytes
+// rather than the framing.
+//
+// ⚠️ Writing this buffer in one call is the shape Hamrah-e Aval now drops. Use
+// [SplitRecords] and write each record separately unless you are deliberately
+// reproducing the old layout.
 func Split(record []byte, offset int) ([]byte, error) {
+	first, second, err := SplitRecords(record, offset)
+	if err != nil {
+		return nil, err
+	}
+	return append(first, second...), nil
+}
+
+// SplitRecords rewrites a ClientHello record into two records, the first
+// ending before the server name, returned separately so each can be written on
+// its own.
+func SplitRecords(record []byte, offset int) ([]byte, []byte, error) {
 	if offset <= 0 {
 		offset = DefaultOffset
 	}
 	if len(record) <= recordHeaderLen || record[0] != recordHandshake {
-		return nil, ErrNotClientHello
+		return nil, nil, ErrNotClientHello
 	}
 	handshake := record[recordHeaderLen:]
 	if len(handshake) == 0 || handshake[0] != handshakeHello {
-		return nil, ErrNotClientHello
+		return nil, nil, ErrNotClientHello
 	}
 
 	sni := IndexSNI(handshake)
 	if sni < 0 {
 		// No server name in play, so there is nothing to gain.
-		return nil, ErrNotClientHello
+		return nil, nil, ErrNotClientHello
 	}
 	split := offset
 	if split >= sni {
@@ -125,13 +144,12 @@ func Split(record []byte, offset int) ([]byte, error) {
 		split = sni / 2
 	}
 	if split <= 0 || split >= len(handshake) {
-		return nil, ErrNotClientHello
+		return nil, nil, ErrNotClientHello
 	}
 
-	out := make([]byte, 0, len(record)+recordHeaderLen)
-	out = appendRecord(out, record[:3], handshake[:split])
-	out = appendRecord(out, record[:3], handshake[split:])
-	return out, nil
+	first := appendRecord(make([]byte, 0, recordHeaderLen+split), record[:3], handshake[:split])
+	second := appendRecord(make([]byte, 0, recordHeaderLen+len(handshake)-split), record[:3], handshake[split:])
+	return first, second, nil
 }
 
 func appendRecord(dst, headerPrefix, payload []byte) []byte {

@@ -21,9 +21,9 @@ func (c *captureConn) Write(b []byte) (int, error) {
 	return c.buf.Write(b)
 }
 
-// TestShape locks in the shape that was measured to work: exactly two records
-// in one segment, the first ending before the server name, the name intact in
-// the second.
+// TestShape locks in the shape that was measured to work: exactly two records,
+// EACH IN ITS OWN WRITE, the first ending before the server name and the name
+// intact in the second.
 func TestShape(t *testing.T) {
 	hello := clientHello("www.example.com")
 	cap := &captureConn{}
@@ -35,8 +35,13 @@ func TestShape(t *testing.T) {
 	if n != len(hello) {
 		t.Fatalf("Write reported %d, want the caller's length %d", n, len(hello))
 	}
-	if cap.writes != 1 {
-		t.Fatalf("both records must leave in one segment, got %d writes", cap.writes)
+	// This assertion is the guard, not a detail. It required a single write
+	// until 2026-09-09, and that is exactly the layout Hamrah-e Aval began
+	// dropping in silence: 0 of 3 reached against a blocked name, where two
+	// writes reached 3 of 3. Merge these again and the package stops working
+	// on that carrier.
+	if cap.writes != 2 {
+		t.Fatalf("each record must leave in its own write, got %d", cap.writes)
 	}
 
 	records := parseRecords(t, cap.buf.Bytes())

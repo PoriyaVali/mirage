@@ -11,6 +11,12 @@ implementations get backwards.
 
 ## The finding
 
+> ⚠️ **September 2026: this reversed on Hamrah-e Aval (MCI).** The August table
+> below said both records must arrive in one TCP write and that separate writes
+> were always dropped. On MCI in September the opposite holds, and the library
+> now writes each record separately. Read both tables before choosing a shape,
+> and measure your own network — see [The reversal](#the-reversal).
+
 Against Iran's DPI, measured from a datacenter host and a residential mobile
 connection, most recently over 680 probes in August 2026:
 
@@ -71,10 +77,10 @@ conn = mirage.NewConn(conn, 0) // 0 selects the measured default offset
 tlsConn := tls.Client(conn, cfg)
 ```
 
-`Split` is also exported if you would rather rewrite a buffer yourself. If you
-do, write **both records in a single call**. The same two records sent as two
-TCP segments were dropped in every measurement, so the layout only survives
-while it arrives together.
+`SplitRecords` is exported if you would rather do the framing yourself. It
+returns the two records separately, and you should write **each one on its
+own**. `Split` still returns them concatenated for callers that only want the
+bytes, but writing that buffer in a single call is the layout MCI now drops.
 
 ## Measure your own network
 
@@ -116,6 +122,44 @@ Two habits make the results trustworthy, both learned the hard way:
 Also worth knowing when reading results: a failure to even establish TCP says
 nothing about the layout, since it happens before any of these bytes are sent.
 Counting those as failures once made a passing size look unstable here.
+
+## The reversal
+
+Measured 2026-09-09 on a rooted handset on **MCI (Hamrah-e Aval)** LTE, with a
+probe using the same uTLS Chrome fingerprint the real client sends, against
+`1.1.1.1:443` with the genuinely blocked name `instagram.com`. A shape that
+reaches there has evaded; the untouched control being reset is what proves the
+censor is still watching. Three rounds, condition order rotated, **15 s between
+every attempt**:
+
+| shape | reached | reset | dropped |
+|---|---|---|---|
+| untouched (control) | 0 | 3 | 0 |
+| two records, **one** write | 0 | 0 | **3** |
+| two records, two writes — 0, 5, 20 and 50 ms apart | **3** each | 0 | 0 |
+| three records, three writes | **3** | 0 | 0 |
+| two records, split at 64, two writes | **3** | 0 | 0 |
+
+End to end, in a real client: a Clash.Meta-derived core using this shape was
+packet-captured from before the process started. With one write, **69 flows and
+not one byte in reply**. Rebuilt with two writes, **52 flows and 52 replies**.
+
+Three things worth carrying away:
+
+* The **gap does nothing**. Zero milliseconds behaved exactly like fifty. What
+  matters is that the records leave in separate writes, so there is no delay to
+  pay for and no timing signature to match on.
+* **Six shapes passed, not one.** The split point and the record count are both
+  free variables, which is what makes the next block survivable.
+* 🔴 **This censor punishes bursts.** Six fragmented attempts back to back made
+  plain TCP `connect()` fail eight times in a row, clearing in under a minute,
+  while an untouched handshake succeeded 4/4 immediately after. Any sweep that
+  tries endpoints in quick succession measures the penalty as well as the
+  shape — `cmd/sweep -mode repeat` exists for exactly this.
+
+Whether August-versus-September is a **carrier** difference or a change over
+**time** is not established: August was Irancell and a datacenter, September is
+MCI. Do not hardcode either shape.
 
 ## Limits
 
