@@ -13,8 +13,11 @@
 //
 // Two constraints come with that:
 //
-//   - The two records must leave in SEPARATE writes. This was the opposite in
-//     August, and the reversal is measured, not guessed - see the note below.
+//   - The two records must leave in SEPARATE writes. MCI drops them when they
+//     share one write; Irancell accepts either. So separate writes is the only
+//     shape measured to pass on both, and the August table's claim that
+//     separate writes always failed did not reproduce on Irancell - twelve of
+//     twelve reached. See the README.
 //   - A size the censor dislikes is dropped even for an allowed name, so a bad
 //     choice takes the whole connection down rather than just failing to
 //     evade. Splitting inside the name is one such choice, and it is what

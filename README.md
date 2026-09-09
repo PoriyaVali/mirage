@@ -26,7 +26,7 @@ connection, most recently over 680 probes in August 2026:
 | 1, 2, 4, 5 bytes, both records in one TCP segment | **works** — every censored name completed a TLS 1.3 handshake |
 | 3 bytes | dropped |
 | 6 bytes and above, up to 64 | dropped |
-| the same two records in **two** TCP segments | dropped |
+| the same two records in **two** TCP segments | dropped — ⚠️ **did not reproduce**, see below |
 | split inside the server name | dropped |
 
 What makes this work is the **size of the first record**, not where the name
@@ -157,9 +157,35 @@ Three things worth carrying away:
   tries endpoints in quick succession measures the penalty as well as the
   shape — `cmd/sweep -mode repeat` exists for exactly this.
 
-Whether August-versus-September is a **carrier** difference or a change over
-**time** is not established: August was Irancell and a datacenter, September is
-MCI. Do not hardcode either shape.
+### Retested on Irancell, and the August row did not hold
+
+The obvious reading of the two tables above was that MCI and Irancell simply
+disagree. That is not what a retest found. Measured 2026-09-09 on the same
+handset with the data SIM switched to **Irancell**, same probe, three rounds,
+order rotated, 20 s between every attempt, against our own node:
+
+| shape | reached | dropped |
+|---|---|---|
+| untouched | 2 | 1 |
+| two records, one write | **3** | 0 |
+| two records, two writes — 0, 5, 20 and 50 ms | **3** each | 0 |
+| three records, three writes | **3** | 0 |
+| two records, split at 64 | **3** | 0 |
+
+So on Irancell **every** fragmented shape passes, including the two-write form
+the August table records as always dropped — twelve of twelve here. Whether
+that is a change on the network or a limit of the earlier measurement cannot be
+told apart from this distance, but the row should not be relied on.
+
+The practical consequence is the useful part. MCI drops the one-write form;
+Irancell accepts both; so **two records in two writes is the only shape
+measured to work on both**, which is why the library emits that and no longer
+needs the shape to be selectable per carrier.
+
+Two cautions that survive. A single run is not a result — the untouched row
+above dropped once out of three, and reading that one drop as a rule is exactly
+the mistake this section exists to correct. And these are two carriers on two
+evenings, not a property of Iranian DPI.
 
 ## Limits
 
