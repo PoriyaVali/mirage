@@ -7,15 +7,34 @@ on:
   pull_request:
   workflow_dispatch:
 
+permissions:
+  contents: read
+
 jobs:
   test:
-    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { os: ubuntu-latest, go: '1.21.x' }
+          - { os: ubuntu-latest, go: oldstable }
+          - { os: ubuntu-latest, go: stable }
+          - { os: windows-latest, go: stable }
+    runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
-      - uses: actions/setup-go@v5
-        with: { go-version: '1.25' }
+      - uses: actions/setup-go@v7
+        with:
+          go-version: ${{ matrix.go }}
+          cache: false
       - run: go vet ./...
-      - run: go test -race -v ./...
+      - run: go test -race -count=1 -v ./...
+      - name: Check formatting
+        shell: bash
+        run: test -z "$(gofmt -l .)"
+      - name: Fuzz record framing
+        if: matrix.os == 'ubuntu-latest' && matrix.go == 'stable'
+        run: go test -run '^$' -fuzz FuzzSplitRecords -fuzztime 20s -parallel 2 .
 
   build:
     needs: test
@@ -23,43 +42,62 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        include:
-          - { name: linux-amd64,            goos: linux,   goarch: amd64 }
-          - { name: linux-arm64,            goos: linux,   goarch: arm64 }
-          - { name: linux-armv7,            goos: linux,   goarch: arm,    goarm: '7' }
-          - { name: linux-mipsle-softfloat, goos: linux,   goarch: mipsle, gomips: softfloat }
-          - { name: linux-mips-softfloat,   goos: linux,   goarch: mips,   gomips: softfloat }
-          - { name: windows-amd64,          goos: windows, goarch: amd64, ext: '.exe' }
-          - { name: windows-arm64,          goos: windows, goarch: arm64, ext: '.exe' }
-          - { name: darwin-amd64,           goos: darwin,  goarch: amd64 }
-          - { name: darwin-arm64,           goos: darwin,  goarch: arm64 }
-          - { name: android-arm64,          goos: android, goarch: arm64 }
+        target:
+          - linux-amd64
+          - linux-arm64
+          - linux-armv7
+          - linux-mipsle-softfloat
+          - linux-mips-softfloat
+          - windows-amd64
+          - windows-arm64
+          - darwin-amd64
+          - darwin-arm64
+          - android-arm64
+    env:
+      BUILD_VERSION: ${{ github.ref_type == 'tag' && github.ref_name || format('dev-{0}', github.sha) }}
+      BUILD_COMMIT: ${{ github.sha }}
     steps:
       - uses: actions/checkout@v4
-      - uses: actions/setup-go@v5
-        with: { go-version: '1.25' }
-      - name: Build miragecheck (${{ matrix.name }})
-        run: |
-          CGO_ENABLED=0 GOOS=${{ matrix.goos }} GOARCH=${{ matrix.goarch }} \
-            GOARM=${{ matrix.goarm }} GOMIPS=${{ matrix.gomips }} \
-            go build -trimpath -ldflags "-s -w" \
-            -o "miragecheck-${{ matrix.name }}${{ matrix.ext }}" ./cmd/miragecheck
-          ls -la miragecheck-${{ matrix.name }}*
+      - uses: actions/setup-go@v7
+        with: { go-version: stable, cache: false }
+      - name: Build both measurement tools
+        run: python3 scripts/build_tools.py --target "${{ matrix.target }}" --output artifacts --version "$BUILD_VERSION" --commit "$BUILD_COMMIT"
       - uses: actions/upload-artifact@v4
         with:
-          name: miragecheck-${{ matrix.name }}
-          path: miragecheck-${{ matrix.name }}*
+          name: tools-${{ matrix.target }}
+          path: artifacts/*
+          if-no-files-found: error
+
+  package:
+    needs: build
+    runs-on: ubuntu-latest
+    env:
+      BUILD_VERSION: ${{ github.ref_type == 'tag' && github.ref_name || format('dev-{0}', github.sha) }}
+      BUILD_COMMIT: ${{ github.sha }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with: { pattern: 'tools-*', path: artifacts, merge-multiple: true }
+      - run: python3 scripts/package_release.py artifacts --version "$BUILD_VERSION" --commit "$BUILD_COMMIT"
+      - run: python3 scripts/package_release.py artifacts --verify
+      - uses: actions/upload-artifact@v4
+        with:
+          name: mirage-release-candidate
+          path: |
+            artifacts/miragecheck-*
+            artifacts/sweep-*
+            artifacts/MANIFEST.json
+            artifacts/SHA256SUMS
 
   release:
     if: startsWith(github.ref, 'refs/tags/')
-    needs: build
+    needs: package
     runs-on: ubuntu-latest
     permissions:
       contents: write
     steps:
       - uses: actions/download-artifact@v4
-        with: { path: artifacts, merge-multiple: true }
-      - run: ls -la artifacts/
+        with: { name: mirage-release-candidate, path: artifacts }
       - uses: softprops/action-gh-release@v2
         with:
-          files: artifacts/miragecheck-*
+          files: artifacts/*

@@ -2,3 +2,7 @@
 /miragecheck
 /miragecheck-*
 *.exe
+/sweep
+/sweep-*
+/artifacts/
+__pycache__/

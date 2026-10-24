@@ -9,7 +9,7 @@ import (
 )
 
 // captureConn records what was written and how many Write calls it took, so a
-// test can assert that both records leave in a single segment.
+// test can assert separate API writes. It does not observe TCP segmentation.
 type captureConn struct {
 	net.Conn
 	buf    bytes.Buffer
@@ -52,7 +52,7 @@ func TestShape(t *testing.T) {
 		t.Errorf("first record is %d bytes, want the small pre-SNI slice of %d", len(records[0]), DefaultOffset)
 	}
 	if strings.Contains(string(records[0]), "www.example.com") {
-		t.Error("the server name must NOT be in the first record; that is the whole point")
+		t.Error("the first record must end before the server name")
 	}
 	if !strings.Contains(string(records[1]), "www.example.com") {
 		t.Error("the server name must stay intact in the second record; splitting inside it was measured to be dropped")
