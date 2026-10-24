@@ -1,3 +1,5 @@
 * text=auto
 *.yml text eol=lf
 *.go text eol=lf
+*.py text eol=lf
+*.md text eol=lf
